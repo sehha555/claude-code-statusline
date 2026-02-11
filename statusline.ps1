@@ -62,11 +62,11 @@ if ($pct -ge 90) { $warn = "(!)" }
 elseif ($pct -ge 70) { $warn = "(*)" }
 else { $warn = "" }
 
-# ===== 訂閱方案監控（從 stats-cache.json + config） =====
+# ===== 訂閱方案監控（即時追蹤） =====
 
 $claudeDir = Join-Path $env:USERPROFILE ".claude"
 $configFile = Join-Path $claudeDir "plan-config.json"
-$cacheFile = Join-Path $claudeDir "stats-cache.json"
+$trackFile = Join-Path $claudeDir "daily-tokens.json"
 
 # 讀取方案設定（預設 pro）
 $plan = "pro"
@@ -88,40 +88,39 @@ if (Test-Path $configFile) {
 $limit = $planLimits[$plan]
 $planLabel = $limit["label"]
 
-# 讀取今日 token 使用量（從 stats-cache.json）
+# 即時追蹤：每個 session 的 output tokens 寫入 daily-tokens.json
+# 格式：{ "date": "2026-02-11", "sessions": { "session-id-1": 12345, "session-id-2": 6789 } }
 $todayStr = (Get-Date).ToString("yyyy-MM-dd")
-$todayOutTokens = 0
-$todayMsgs = 0
-$todaySessions = 0
+$sessionId = if ($data.session_id) { $data.session_id } else { "unknown" }
+$track = $null
 
-if (Test-Path $cacheFile) {
+if (Test-Path $trackFile) {
     try {
-        $cache = Get-Content $cacheFile -Raw | ConvertFrom-Json
-
-        # 每日 output tokens
-        foreach ($day in $cache.dailyModelTokens) {
-            if ($day.date -eq $todayStr) {
-                $props = $day.tokensByModel.PSObject.Properties
-                foreach ($p in $props) {
-                    $todayOutTokens += [double]$p.Value
-                }
-                break
-            }
-        }
-
-        # 每日 message count
-        foreach ($day in $cache.dailyActivity) {
-            if ($day.date -eq $todayStr) {
-                $todayMsgs = [int]$day.messageCount
-                $todaySessions = [int]$day.sessionCount
-                break
-            }
-        }
+        $track = Get-Content $trackFile -Raw | ConvertFrom-Json
     } catch {}
 }
 
-# 加上當前 session 的 output tokens（可能還沒寫入 cache）
-$todayOutWithSession = $todayOutTokens + $outTokens
+# 日期不同 → 重置（新的一天）
+if (-not $track -or $track.date -ne $todayStr) {
+    $track = [PSCustomObject]@{
+        date = $todayStr
+        sessions = [PSCustomObject]@{}
+    }
+}
+
+# 更新當前 session 的 token 數
+$track.sessions | Add-Member -NotePropertyName $sessionId -NotePropertyValue $outTokens -Force
+
+# 寫回檔案
+try {
+    $track | ConvertTo-Json -Depth 3 | Set-Content $trackFile -Encoding UTF8
+} catch {}
+
+# 加總今日所有 session 的 output tokens
+$todayOutWithSession = 0
+foreach ($p in $track.sessions.PSObject.Properties) {
+    $todayOutWithSession += [double]$p.Value
+}
 
 # 格式化今日用量
 $todayFmt = Format-Tokens $todayOutWithSession
